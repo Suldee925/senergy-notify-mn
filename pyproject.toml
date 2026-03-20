@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "notify-mn"
+version = "0.1.0"
+description = "A simple push notification library for Python"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "c1rtkaal" }
+]
+dependencies = [
+  "firebase-admin>=6.5.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
