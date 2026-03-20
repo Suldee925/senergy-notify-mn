@@ -60,10 +60,16 @@ class NotificationService:
         )
 
     def send_charging_error(self, user_id: int, reason: str) -> list[dict]:
-        return self.manager.send_template(
+        return self.manager.send(
             user_id=user_id,
-            template_key="charging_error",
-            reason=reason,
+            title="Цэнэглэлтэд алдаа гарлаа",
+            body="Цэнэглэж байх үед алдаа гарлаа. Оператор руу холбогдоно уу.",
+            priority="high",
+            notification_type="charging_error",
+            data={
+                "type": "charging_error",
+                "reason": reason,
+            },
         )
 
     def send_invoice_ready(self, user_id: int, invoice_id: str) -> list[dict]:

@@ -13,6 +13,8 @@ class InMemoryLogRepository(BaseLogRepository):
         title: str,
         body: str,
         result: dict,
+        priority: str,
+        notification_type: str,
     ) -> None:
         self.logs.append(
             {
@@ -21,5 +23,7 @@ class InMemoryLogRepository(BaseLogRepository):
                 "title": title,
                 "body": body,
                 "result": result,
+                "priority": priority,
+                "notification_type": notification_type,
             }
         )

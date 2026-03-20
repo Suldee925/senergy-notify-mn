@@ -1,60 +1,34 @@
-from notify_mn import NotificationManager
-from notify_mn.providers import FCMProvider
-from notify_mn.repositories.device_tokens import InMemoryTokenRepository
-from notify_mn.repositories.notification_logs import InMemoryLogRepository
-
-
-class InsufficientBalanceError(Exception):
-    description = "Balance insufficient"
-
-
-class ChargePointOfflineError(Exception):
-    description = "Charge point offline"
+from notify_mn import FCMProvider, NotificationManager, NotificationService
+from notify_mn.repositories import InMemoryLogRepository, InMemoryTokenRepository
 
 
 def main():
-    token_repo = InMemoryTokenRepository({
-        1: [
-            "PASTE_REAL_FCM_DEVICE_TOKEN_HERE"
-        ]
-    })
+    firebase_path = "firebase-service-account.json"
 
+    provider = FCMProvider(service_account_path=firebase_path)
+    token_repo = InMemoryTokenRepository()
     log_repo = InMemoryLogRepository()
-    provider = FCMProvider()
 
     manager = NotificationManager(
         provider=provider,
         token_repo=token_repo,
         log_repo=log_repo,
+        max_retries=2,
     )
+    service = NotificationService(manager)
 
-    print("=== TEMPLATE NOTIFICATION ===")
-    results = manager.send_template(
+    service.register_device_token(
         user_id=1,
-        template_key="charging_completed",
+        token="sample-device-token",
+        platform="android",
     )
-    for item in results:
-        print(item)
 
-    print("\n=== ERROR NOTIFICATION: BALANCE ===")
-    results = manager.send_error_notification(
+    result = service.send_charging_completed(
         user_id=1,
-        error=InsufficientBalanceError(),
+        session_id="SESSION-123",
     )
-    for item in results:
-        print(item)
 
-    print("\n=== ERROR NOTIFICATION: CHARGING ===")
-    results = manager.send_error_notification(
-        user_id=1,
-        error=ChargePointOfflineError(),
-    )
-    for item in results:
-        print(item)
-
-    print("\n=== LOGS ===")
-    for log in log_repo.logs:
-        print(log)
+    print(result)
 
 
 if __name__ == "__main__":

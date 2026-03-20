@@ -1,109 +1,129 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
-
-import firebase_admin
-from firebase_admin import credentials, messaging
-
-from notify_mn.exceptions import InvalidDeviceTokenError, ProviderRetryableError
+from .error_policy import ERROR_POLICY
+from .exceptions import InvalidDeviceTokenError, TemplateNotFoundError
+from .models import NotificationPayload
+from .retry import retry_call
+from .templates import TEMPLATES
 
 
-INVALID_TOKEN_MARKERS = (
-    "registration-token-not-registered",
-    "requested entity was not found",
-    "not a valid fcm registration token",
-    "registration token is not valid",
-    "unregistered",
-    "invalid registration token",
-)
+class NotificationManager:
+    def __init__(self, provider, token_repo, log_repo, *, max_retries: int = 2):
+        self.provider = provider
+        self.token_repo = token_repo
+        self.log_repo = log_repo
+        self.max_retries = max_retries
 
-RETRYABLE_MARKERS = (
-    "internal",
-    "server unavailable",
-    "quota exceeded",
-    "temporarily unavailable",
-    "deadline exceeded",
-    "timeout",
-    "timed out",
-)
+    def send(
+        self,
+        user_id: int,
+        title: str,
+        body: str,
+        data: dict | None = None,
+        *,
+        priority: str = "normal",
+        notification_type: str = "general",
+    ) -> list[dict]:
+        tokens = self.token_repo.get_user_tokens(user_id)
 
+        if not tokens:
+            return [{"success": False, "error": "NO_DEVICE_TOKENS"}]
 
-@dataclass(slots=True)
-class ProviderErrorContext:
-    message: str
-    is_invalid_token: bool = False
-    is_retryable: bool = False
-
-
-class FCMProvider:
-    name = "fcm"
-
-    def __init__(self, service_account_path: str):
-        if not service_account_path:
-            raise ValueError("service_account_path is required")
-
-        self.service_account_path = service_account_path
-
-        if not firebase_admin._apps:
-            cred = credentials.Certificate(self.service_account_path)
-            firebase_admin.initialize_app(cred)
-
-    def send(self, token: str, payload) -> dict[str, Any]:
-        try:
-            message = messaging.Message(
-                token=token,
-                notification=messaging.Notification(
-                    title=payload.title,
-                    body=payload.body,
-                ),
-                data={k: str(v) for k, v in (payload.data or {}).items()},
-                android=messaging.AndroidConfig(
-                    priority=self._android_priority(payload.priority)
-                ),
-                apns=messaging.APNSConfig(
-                    headers={"apns-priority": self._apns_priority(payload.priority)}
-                ),
-            )
-
-            message_id = messaging.send(message)
-
-        except Exception as exc:  # pragma: no cover
-            context = self.classify_error(exc)
-
-            if context.is_invalid_token:
-                raise InvalidDeviceTokenError(context.message) from exc
-
-            if context.is_retryable:
-                raise ProviderRetryableError(context.message) from exc
-
-            raise RuntimeError(context.message) from exc
-
-        return {
-            "success": True,
-            "provider": self.name,
-            "token": token,
-            "title": payload.title,
-            "body": payload.body,
-            "priority": payload.priority,
-            "notification_type": payload.notification_type,
-            "message_id": message_id,
-        }
-
-    def classify_error(self, error: Exception) -> ProviderErrorContext:
-        message = str(error)
-        lowered = message.lower()
-
-        return ProviderErrorContext(
-            message=message,
-            is_invalid_token=any(marker in lowered for marker in INVALID_TOKEN_MARKERS),
-            is_retryable=any(marker in lowered for marker in RETRYABLE_MARKERS),
+        payload = NotificationPayload(
+            user_id=user_id,
+            title=title,
+            body=body,
+            data=data or {},
+            priority=priority,
+            notification_type=notification_type,
         )
 
-    @staticmethod
-    def _android_priority(priority: str) -> str:
-        return "high" if priority == "high" else "normal"
+        results: list[dict] = []
 
-    @staticmethod
-    def _apns_priority(priority: str) -> str:
-        return "10" if priority == "high" else "5"
+        for token in tokens:
+            result = self._send_to_token(token=token, payload=payload)
+
+            self.log_repo.save(
+                user_id=user_id,
+                token=token,
+                title=title,
+                body=body,
+                result=result,
+                priority=priority,
+                notification_type=notification_type,
+            )
+            results.append(result)
+
+        return results
+
+    def send_template(self, user_id: int, template_key: str, **kwargs) -> list[dict]:
+        if template_key not in TEMPLATES:
+            raise TemplateNotFoundError(f"Template not found: {template_key}")
+
+        template = TEMPLATES[template_key]
+        title = template["title"].format(**kwargs)
+        body = template["body"].format(**kwargs)
+
+        return self.send(
+            user_id=user_id,
+            title=title,
+            body=body,
+            data={"template": template_key, **kwargs},
+            priority=template.get("priority", "normal"),
+            notification_type=template.get("type", template_key),
+        )
+
+    def send_error_notification(self, user_id: int, error: Exception) -> list[dict]:
+        error_name = error.__class__.__name__
+        policy = ERROR_POLICY.get(error_name)
+
+        if not policy or not policy["should_notify"]:
+            return []
+
+        return self.send(
+            user_id=user_id,
+            title=policy["title"],
+            body=policy["body"],
+            priority=policy.get("priority", "normal"),
+            notification_type=policy.get("type", "error_notification"),
+            data={
+                "type": policy.get("type", "error_notification"),
+                "group": policy["group"],
+                "error_name": error_name,
+                "description": getattr(error, "description", str(error)),
+            },
+        )
+
+    def _send_to_token(self, *, token: str, payload: NotificationPayload) -> dict:
+        try:
+            return retry_call(
+                lambda: self.provider.send(token, payload),
+                max_retries=self.max_retries,
+            )
+
+        except InvalidDeviceTokenError as exc:
+            self.token_repo.deactivate_token(token, reason=str(exc))
+            return {
+                "success": False,
+                "provider": getattr(self.provider, "name", "provider"),
+                "token": token,
+                "title": payload.title,
+                "body": payload.body,
+                "priority": payload.priority,
+                "notification_type": payload.notification_type,
+                "error": str(exc),
+                "token_deactivated": True,
+            }
+
+        except Exception as exc:
+            return {
+                "success": False,
+                "provider": getattr(self.provider, "name", "provider"),
+                "token": token,
+                "title": payload.title,
+                "body": payload.body,
+                "priority": payload.priority,
+                "notification_type": payload.notification_type,
+                "error": str(exc),
+                "token_deactivated": False,
+            }

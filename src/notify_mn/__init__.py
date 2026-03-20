@@ -1,6 +1,6 @@
 from .manager import NotificationManager
 from .models import NotificationPayload
-from .providers.fcm import FCMProvider
+from .providers import FCMProvider
 from .services import NotificationService
 
 __all__ = [

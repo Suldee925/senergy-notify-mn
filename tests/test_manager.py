@@ -1,9 +1,12 @@
 from notify_mn import NotificationManager
+from notify_mn.exceptions import InvalidDeviceTokenError, ProviderRetryableError
 from notify_mn.repositories.device_tokens import InMemoryTokenRepository
 from notify_mn.repositories.notification_logs import InMemoryLogRepository
 
 
 class FakeProvider:
+    name = "fake"
+
     def send(self, token: str, payload) -> dict:
         return {
             "success": True,
@@ -11,8 +14,39 @@ class FakeProvider:
             "token": token,
             "title": payload.title,
             "body": payload.body,
+            "priority": payload.priority,
+            "notification_type": payload.notification_type,
             "message_id": "test-message-id",
         }
+
+
+class RetryThenSuccessProvider:
+    name = "fake"
+
+    def __init__(self):
+        self.calls = 0
+
+    def send(self, token: str, payload) -> dict:
+        self.calls += 1
+        if self.calls < 2:
+            raise ProviderRetryableError("temporary")
+        return {
+            "success": True,
+            "provider": "fake",
+            "token": token,
+            "title": payload.title,
+            "body": payload.body,
+            "priority": payload.priority,
+            "notification_type": payload.notification_type,
+            "message_id": "retried-success",
+        }
+
+
+class InvalidTokenProvider:
+    name = "fake"
+
+    def send(self, token: str, payload) -> dict:
+        raise InvalidDeviceTokenError("registration-token-not-registered")
 
 
 class InsufficientBalanceError(Exception):
@@ -92,3 +126,42 @@ def test_send_error_notification_charging_station():
     assert results[0]["success"] is True
     assert results[0]["title"] == "Цэнэглэгч ажиллахгүй байна"
     assert len(log_repo.logs) == 1
+
+
+def test_retry_then_success():
+    token_repo = InMemoryTokenRepository({1: ["abc"]})
+    log_repo = InMemoryLogRepository()
+    provider = RetryThenSuccessProvider()
+
+    manager = NotificationManager(provider, token_repo, log_repo, max_retries=2)
+    results = manager.send_template(user_id=1, template_key="charging_completed")
+
+    assert len(results) == 1
+    assert results[0]["success"] is True
+    assert provider.calls == 2
+
+
+def test_invalid_token_deactivates_token():
+    token_repo = InMemoryTokenRepository({1: ["dead-token"]})
+    log_repo = InMemoryLogRepository()
+    provider = InvalidTokenProvider()
+
+    manager = NotificationManager(provider, token_repo, log_repo)
+    results = manager.send_template(user_id=1, template_key="charging_completed")
+
+    assert len(results) == 1
+    assert results[0]["success"] is False
+    assert results[0]["token_deactivated"] is True
+    assert token_repo.get_user_tokens(1) == []
+
+
+def test_register_token_updates_repository():
+    token_repo = InMemoryTokenRepository({})
+    token_repo.register_token(
+        user_id=7,
+        token="new-token",
+        platform="android",
+        is_active=True,
+    )
+
+    assert token_repo.get_user_tokens(7) == ["new-token"]
